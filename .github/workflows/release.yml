@@ -1,0 +1,105 @@
+name: Release installers
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build ${{ matrix.name }}
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Windows x64
+            os: windows-latest
+            args: --bundles nsis
+            targets: x86_64-pc-windows-msvc
+          - name: macOS universal
+            os: macos-latest
+            args: --target universal-apple-darwin --bundles app,dmg
+            targets: aarch64-apple-darwin,x86_64-apple-darwin
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.targets }}
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+      - run: npm ci
+      - run: npm test
+      - name: Native tests
+        run: cargo test --locked --manifest-path src-tauri/Cargo.toml --lib
+      - name: Check release version
+        shell: bash
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          if [[ "$GITHUB_REF_TYPE" == "tag" && "$GITHUB_REF_NAME" != "v$VERSION" ]]; then
+            echo "Tag must match package version v$VERSION"
+            exit 1
+          fi
+      - name: Build installers and stage release
+        uses: tauri-apps/tauri-action@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: v__VERSION__
+          releaseName: FlowX v__VERSION__
+          releaseBody: |
+            FlowX desktop preview: API requests, JSON/XML Form View, output variables and visual workflows.
+
+            Download the Windows x64 setup .exe or the macOS universal .dmg (Apple Silicon and Intel).
+            These preview installers are unsigned; OS security warnings may appear. Signing/notarization is not yet configured.
+            macOS: open the DMG and drag FlowX to Applications. Windows: run the setup executable; WebView2 is installed if needed.
+          releaseDraft: true
+          prerelease: true
+          args: ${{ matrix.args }}
+      - name: Preserve build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: FlowX-${{ matrix.os }}
+          path: |
+            src-tauri/target/**/bundle/nsis/*.exe
+            src-tauri/target/**/bundle/dmg/*.dmg
+          if-no-files-found: error
+
+  publish:
+    name: Publish completed release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Publish only after both installer builds succeed
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const version = JSON.parse(fs.readFileSync('package.json', 'utf8')).version;
+            const { owner, repo } = context.repo;
+            const releases = await github.paginate(github.rest.repos.listReleases, { owner, repo });
+            const release = releases.find(r => r.tag_name === `v${version}`);
+            if (!release) throw new Error('Staged release not found');
+            const assets = await github.paginate(github.rest.repos.listReleaseAssets, { owner, repo, release_id: release.id });
+            if (!assets.some(a => a.name.endsWith('.exe')) || !assets.some(a => a.name.endsWith('.dmg'))) {
+              throw new Error('Both Windows and macOS installers are required before publishing');
+            }
+            await github.rest.repos.updateRelease({ owner, repo, release_id: release.id, draft: false, prerelease: true });
+            core.notice(`Published ${release.html_url}`);

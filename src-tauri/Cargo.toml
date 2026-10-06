@@ -1,0 +1,20 @@
+[package]
+name = "flowx"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "flowx_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+serde = { version = "1", features = ["derive"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "multipart"] }
+
+tokio = { version = "1", features = ["sync", "macros", "rt-multi-thread"] }
+rusqlite = { version = "0.32", features = ["bundled"] }
+serde_json = "1"
